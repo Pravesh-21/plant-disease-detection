@@ -80,6 +80,7 @@ _CHILD_HF_FILES: Dict[str, str] = {
     "corn": "Corn_best_int8.onnx",
     "grape": "Grape_best_int8.onnx",
     "groundnut": "Groundnut_best_int8.onnx",
+    "guava": "Guava_best_int8.onnx",
     "jackfruit": "Jackfruit_best_int8.onnx",
     "juniper": "Juniper_best_int8.onnx",
     "lemon": "Lemon_best_int8.onnx",
