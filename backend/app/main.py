@@ -4,7 +4,8 @@ import uvicorn
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import utms_router, mission_router, inference_router
+from fastapi.staticfiles import StaticFiles
+from app.routers import utms_router, mission_router, inference_router, verification_router, admin_auth_router
 from app.services.inference import ModelRegistry
 
 # Set up logging configuration for structured console output
@@ -108,6 +109,7 @@ app.include_router(utms_router,          prefix="/api")
 app.include_router(mission_router,       prefix="/api")
 app.include_router(inference_router,     prefix="/api")
 app.include_router(verification_router,  prefix="/api")
+app.include_router(admin_auth_router,     prefix="/api")
 
 
 @app.get("/")

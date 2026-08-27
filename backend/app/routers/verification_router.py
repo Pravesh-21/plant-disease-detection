@@ -13,7 +13,7 @@ from sqlalchemy import select, func, or_, and_
 
 from app.core.database import get_db
 from app.models.verification import RawInput, VerificationFrame
-from app.services.frame_sampler import FrameSamplerService
+from app.services.frame_sampler import FrameSamplerService, resolve_target_model
 
 logger = logging.getLogger("app.routers.verification_router")
 
@@ -50,12 +50,13 @@ async def list_verification_frames(
     min_confidence: float = Query(0.0, ge=0.0, le=1.0),
     max_confidence: float = Query(1.0, ge=0.0, le=1.0),
     crop_type: Optional[str] = Query(None),
+    target_model_name: Optional[str] = Query(None, description="Filter by exact child model, e.g., Apple_best_int8.onnx"),
     source_type: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Retrieves paginated verification frames from Neon DB with filtering
-    by status, confidence range, crop type, and source media type.
+    by status, target child model, confidence range, crop type, and source media type.
     """
     if db is None:
         return {
@@ -64,12 +65,16 @@ async def list_verification_frames(
             "metrics": {"pending_count": 0, "approved_count": 0, "rejected_count": 0, "corrected_count": 0, "low_confidence_count": 0, "total_count": 0}
         }
 
-    # Base query
     query = select(VerificationFrame).outerjoin(RawInput)
 
     filters = []
     if status and status.lower() != "all":
-        filters.append(VerificationFrame.status == status.lower())
+        filters.append(
+            or_(
+                VerificationFrame.status == status.lower(),
+                VerificationFrame.verification_status == status.lower()
+            )
+        )
     
     if min_confidence > 0.0 or max_confidence < 1.0:
         filters.append(
@@ -86,6 +91,9 @@ async def list_verification_frames(
                 VerificationFrame.human_crop_label.ilike(f"%{crop_type}%")
             )
         )
+
+    if target_model_name and target_model_name.strip():
+        filters.append(VerificationFrame.target_model_name.ilike(f"%{target_model_name.strip()}%"))
 
     if source_type and source_type.strip() and source_type.lower() != "all":
         filters.append(RawInput.source_type == source_type.lower())
@@ -138,6 +146,10 @@ async def list_verification_frames(
         except Exception:
             h_annos = []
 
+        # Ensure target_model_name is populated
+        eff_crop = f.human_crop_label or f.parent_crop_predicted
+        target_model = f.target_model_name or resolve_target_model(eff_crop)
+
         serialized_frames.append({
             "id": f.id,
             "raw_input_id": f.raw_input_id,
@@ -145,9 +157,11 @@ async def list_verification_frames(
             "storage_path": f.storage_path,
             "image_url": f.image_url or f"/api/admin/verification/frame-image/{f.id}",
             "parent_crop_predicted": f.parent_crop_predicted,
+            "target_model_name": target_model,
             "parent_confidence": f.parent_confidence,
             "model_predictions": preds,
             "status": f.status,
+            "verification_status": f.verification_status or f.status,
             "human_crop_label": f.human_crop_label,
             "human_annotations": h_annos,
             "verified_by": f.verified_by,
@@ -184,7 +198,9 @@ async def annotate_verification_frame(
 ):
     """
     Accepts human verification updates (approve, reject, or modify bounding boxes).
-    Automatically sets ready_for_retraining = True when status is 'approved' or 'corrected'.
+    Strict Rule: If human_crop_label is updated, automatically re-assigns target_model_name 
+    to the matched specialist child ONNX model (e.g. 'Apple' -> 'Apple_best_int8.onnx').
+    Sets ready_for_retraining = True when status is 'approved' or 'corrected'.
     """
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection unavailable.")
@@ -201,11 +217,17 @@ async def annotate_verification_frame(
         raise HTTPException(status_code=400, detail="Status must be 'approved', 'rejected', or 'corrected'.")
 
     frame.status = new_status
+    frame.verification_status = new_status
     frame.verified_by = payload.verified_by or "Human_Annotator_1"
     frame.verified_at = datetime.now(timezone.utc)
 
+    # Re-assign target_model_name strictly based on updated human_crop_label
     if payload.human_crop_label and payload.human_crop_label.strip():
-        frame.human_crop_label = payload.human_crop_label.strip()
+        new_crop = payload.human_crop_label.strip()
+        frame.human_crop_label = new_crop
+        frame.target_model_name = resolve_target_model(new_crop)
+    elif frame.parent_crop_predicted:
+        frame.target_model_name = resolve_target_model(frame.parent_crop_predicted)
 
     if payload.human_annotations is not None:
         annos_json = [a.model_dump() for a in payload.human_annotations]
@@ -220,7 +242,7 @@ async def annotate_verification_frame(
     await db.commit()
     await db.refresh(frame)
 
-    logger.info(f"[HITL] Frame #{frame.id} updated to status='{new_status}', ready_for_retraining={frame.ready_for_retraining}")
+    logger.info(f"[HITL] Frame #{frame.id} updated: status='{new_status}', target_model='{frame.target_model_name}', ready_for_retraining={frame.ready_for_retraining}")
 
     h_annos = []
     try:
@@ -230,11 +252,13 @@ async def annotate_verification_frame(
 
     return {
         "status": "success",
-        "message": f"Frame #{frame.id} updated to '{new_status}'.",
+        "message": f"Frame #{frame.id} updated to '{new_status}' with target model '{frame.target_model_name}'.",
         "frame": {
             "id": frame.id,
             "status": frame.status,
+            "verification_status": frame.verification_status,
             "human_crop_label": frame.human_crop_label,
+            "target_model_name": frame.target_model_name,
             "human_annotations": h_annos,
             "ready_for_retraining": frame.ready_for_retraining,
             "verified_at": frame.verified_at.isoformat() if frame.verified_at else None,
@@ -286,22 +310,28 @@ async def ingest_media_file(
 
 @router.get("/export")
 async def export_retraining_dataset(
-    format: str = Query("json", description="'json' or 'yolo'"),
+    format: str = Query("yolo", description="'json' or 'yolo'"),
+    target_model_name: Optional[str] = Query(None, description="Filter dataset export by exact child ONNX model, e.g. Apple_best_int8.onnx"),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Exports all verified frames marked ready_for_retraining = True 
-    formatted as a downloadable JSON or YOLO dataset archive.
+    filtered by target child model pool formatted as a downloadable YOLO dataset zip or JSON.
     """
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection unavailable.")
 
-    stmt = select(VerificationFrame).where(VerificationFrame.ready_for_retraining == True)
-    res = await db.execute(stmt)
+    query = select(VerificationFrame).where(VerificationFrame.ready_for_retraining == True)
+    if target_model_name and target_model_name.strip():
+        query = query.where(VerificationFrame.target_model_name.ilike(f"%{target_model_name.strip()}%"))
+
+    res = await db.execute(query)
     frames = res.scalars().all()
 
     if not frames:
-        raise HTTPException(status_code=404, detail="No verified frames marked ready_for_retraining = True found.")
+        raise HTTPException(status_code=404, detail="No verified frames ready for retraining found matching the specified model target.")
+
+    model_tag = target_model_name.replace(".onnx", "").replace(".pt", "") if target_model_name else "all_models"
 
     if format.lower() == "json":
         dataset_records = []
@@ -315,6 +345,7 @@ async def export_retraining_dataset(
             dataset_records.append({
                 "frame_id": f.id,
                 "crop_label": f.human_crop_label or f.parent_crop_predicted or "Plant",
+                "target_model_name": f.target_model_name or resolve_target_model(f.human_crop_label or f.parent_crop_predicted),
                 "status": f.status,
                 "storage_path": f.storage_path,
                 "image_url": f.image_url,
@@ -324,8 +355,9 @@ async def export_retraining_dataset(
             })
 
         payload = {
-            "dataset_name": "Project_Jatayu_HITL_Retraining_Dataset",
+            "dataset_name": f"Project_Jatayu_FineTuning_Dataset_{model_tag}",
             "exported_at": datetime.now(timezone.utc).isoformat(),
+            "target_model_name": target_model_name or "All Child Models",
             "total_samples": len(dataset_records),
             "samples": dataset_records
         }
@@ -334,7 +366,7 @@ async def export_retraining_dataset(
         return Response(
             content=json_bytes,
             media_type="application/json",
-            headers={"Content-Disposition": f"attachment; filename=jatayu_retraining_dataset_{len(frames)}samples.json"}
+            headers={"Content-Disposition": f"attachment; filename=jatayu_retraining_{model_tag}_{len(frames)}samples.json"}
         )
 
     # YOLO Zip Format Export
@@ -343,9 +375,7 @@ async def export_retraining_dataset(
         class_mapping: Dict[str, int] = {}
         class_counter = 0
 
-        manifest_lines = []
         for f in frames:
-            # Read image to get width & height if possible
             if os.path.exists(f.storage_path):
                 zf.write(f.storage_path, arcname=f"images/frame_{f.id}.jpg")
 
@@ -370,22 +400,21 @@ async def export_retraining_dataset(
 
             zf.writestr(f"labels/frame_{f.id}.txt", "\n".join(txt_lines))
 
-        # Write data.yaml manifest
         classes_yaml = "\n".join([f"  {idx}: '{name}'" for name, idx in class_mapping.items()])
-        yaml_content = f"path: ./dataset\ntrain: images\nval: images\nnames:\n{classes_yaml}\n"
+        yaml_content = f"# Project Jatayu Fine-Tuning Dataset for {target_model_name or 'All Models'}\npath: ./dataset\ntrain: images\nval: images\nnames:\n{classes_yaml}\n"
         zf.writestr("dataset.yaml", yaml_content)
 
     zip_buffer.seek(0)
     return StreamingResponse(
         zip_buffer,
         media_type="application/zip",
-        headers={"Content-Disposition": f"attachment; filename=jatayu_yolo_dataset_{len(frames)}samples.zip"}
+        headers={"Content-Disposition": f"attachment; filename=jatayu_yolo_{model_tag}_{len(frames)}samples.zip"}
     )
 
 
 @router.get("/frame-image/{frame_id}")
 async def get_frame_image(frame_id: int, db: AsyncSession = Depends(get_db)):
-    """Serves the frame image file for rendering in the Next.js HITL verification canvas."""
+    """Serves the frame image file for rendering in the HITL verification canvas."""
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection unavailable.")
 

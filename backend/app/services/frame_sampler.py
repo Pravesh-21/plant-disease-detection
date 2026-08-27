@@ -18,11 +18,59 @@ logger = logging.getLogger("app.services.frame_sampler")
 UPLOAD_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "uploads", "verification_frames"))
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+# Strict Parent Crop -> Child Specialist ONNX Model File Mapping
+CROP_TO_CHILD_MODEL: Dict[str, str] = {
+    "apple": "Apple_best_int8.onnx",
+    "banana": "Banana_best_int8.onnx",
+    "bittergourd": "Bitter_Gourd_best_int8.onnx",
+    "brinjal": "Brinjal_best_int8.onnx",
+    "cashew": "Cashew_best_int8.onnx",
+    "cassava": "Cassava_best_int8.onnx",
+    "cauliflower": "Cauliflower_best_int8.onnx",
+    "cherry": "Cherry_best_int8.onnx",
+    "coconut": "Coconut_best_int8.onnx",
+    "coffee": "Coffee_best_int8.onnx",
+    "coriander": "Coriander_best_int8.onnx",
+    "corn": "Corn_best_int8.onnx",
+    "grape": "Grape_best_int8.onnx",
+    "groundnut": "Groundnut_best_int8.onnx",
+    "guava": "Guava_best_int8.onnx",
+    "jackfruit": "Jackfruit_best_int8.onnx",
+    "juniper": "Juniper_best_int8.onnx",
+    "lemon": "Lemon_best_int8.onnx",
+    "mango": "Mango_best_int8.onnx",
+    "neem": "Neem_best_int8.onnx",
+    "papaya": "Papaya_best_int8.onnx",
+    "peach": "Peach_best_int8.onnx",
+    "pepperbell": "Pepper_Bell_best_int8.onnx",
+    "potato": "Potato_best_int8.onnx",
+    "pumpkin": "Pumkin_best_int8.onnx",
+    "pumkin": "Pumkin_best_int8.onnx",
+    "rice": "Rice_best_int8.onnx",
+    "rose": "Rose_best_int8.onnx",
+    "sesame": "Sesame_best_int8.onnx",
+    "soybean": "SoyaBean_best_int8.onnx",
+    "soyabean": "SoyaBean_best_int8.onnx",
+    "strawberry": "Strawberry_best_int8.onnx",
+    "sugarcane": "SugarCane_best_int8.onnx",
+    "sunflower": "Sunflower_best_int8.onnx",
+    "tobacco": "Tobacco_best_int8.onnx",
+    "tomato": "Tomato_best_int8.onnx",
+    "wheat": "Wheat_best_int8.onnx",
+}
+
+def resolve_target_model(crop_name: Optional[str]) -> str:
+    """Maps predicted or ground-truth crop species to the exact child ONNX model filename."""
+    if not crop_name:
+        return "ParentEnsemble.onnx"
+    norm = crop_name.lower().replace("_", "").replace(" ", "").replace("-", "")
+    return CROP_TO_CHILD_MODEL.get(norm, f"{crop_name}_best_int8.onnx")
+
+
 class FrameSamplerService:
     """
     Frame Ingestion & Sampling Pipeline Service for Project Jatayu.
-    Converts incoming media (single image, video upload, or live UAV stream) into 
-    sampled verification frames stored in Neon DB for Human-in-the-Loop verification.
+    Enforces strict Parent-to-Child routing (Parent predicts crop -> routes only to matched child ONNX).
     """
 
     _last_stream_sample_time: float = 0.0
@@ -42,7 +90,6 @@ class FrameSamplerService:
         with open(storage_path, "wb") as f:
             f.write(image_bytes)
 
-        # Create RawInput entry
         raw_input = RawInput(
             source_type="single_image",
             original_filename=original_filename,
@@ -55,6 +102,7 @@ class FrameSamplerService:
 
         # Run Two-Phase Model Inference
         predictions, crop_name, conf = await cls._run_inference_on_file(storage_path)
+        target_model = resolve_target_model(crop_name)
 
         rel_url = f"/uploads/verification_frames/{unique_name}"
         frame = VerificationFrame(
@@ -63,16 +111,18 @@ class FrameSamplerService:
             storage_path=storage_path,
             image_url=rel_url,
             parent_crop_predicted=crop_name,
+            target_model_name=target_model,
             parent_confidence=conf,
             model_predictions=json.dumps(predictions),
             status="pending",
+            verification_status="pending",
             ready_for_retraining=False
         )
         db.add(frame)
         await db.commit()
         await db.refresh(frame)
 
-        logger.info(f"[FrameSampler] Processed single image ID={frame.id}, crop='{crop_name}', conf={conf:.2f}")
+        logger.info(f"[FrameSampler] Processed single image ID={frame.id}, crop='{crop_name}', target='{target_model}', conf={conf:.2f}")
         return raw_input, frame
 
     @classmethod
@@ -85,8 +135,8 @@ class FrameSamplerService:
     ) -> Tuple[RawInput, List[VerificationFrame]]:
         """
         Processes a video file using OpenCV.
-        Samples 1 frame per second (or keyframes), uploads frames to disk storage,
-        runs model inference, and logs batch database rows.
+        Samples 1 frame per second, runs parent crop classification -> matches child ONNX model,
+        and logs batch database rows.
         """
         temp_video_path = os.path.join(UPLOAD_DIR, f"temp_vid_{uuid.uuid4().hex[:8]}.mp4")
         with open(temp_video_path, "wb") as f:
@@ -129,11 +179,10 @@ class FrameSamplerService:
                     frame_filename = f"video_{raw_input.id}_f{saved_count:04d}_{uuid.uuid4().hex[:6]}.jpg"
                     frame_storage_path = os.path.join(UPLOAD_DIR, frame_filename)
 
-                    # Save BGR OpenCV frame to JPEG
                     cv2.imwrite(frame_storage_path, frame_mat)
 
-                    # Run model inference
                     predictions, crop_name, conf = await cls._run_inference_on_file(frame_storage_path)
+                    target_model = resolve_target_model(crop_name)
 
                     rel_url = f"/uploads/verification_frames/{frame_filename}"
                     vf = VerificationFrame(
@@ -142,9 +191,11 @@ class FrameSamplerService:
                         storage_path=frame_storage_path,
                         image_url=rel_url,
                         parent_crop_predicted=crop_name,
+                        target_model_name=target_model,
                         parent_confidence=conf,
                         model_predictions=json.dumps(predictions),
                         status="pending",
+                        verification_status="pending",
                         ready_for_retraining=False
                     )
                     db.add(vf)
@@ -169,20 +220,17 @@ class FrameSamplerService:
     ) -> Optional[VerificationFrame]:
         """
         Processes an incoming UAV live stream frame.
-        Filters frames: captures keyframes every 3 seconds OR whenever prediction confidence < 0.80.
+        Samples keyframe every 3 seconds OR whenever confidence < 0.80.
         """
         now = time.time()
         time_elapsed = now - cls._last_stream_sample_time
 
-        # Save to temporary path to run inference
         temp_path = os.path.join(UPLOAD_DIR, f"stream_check_{uuid.uuid4().hex[:6]}.jpg")
         with open(temp_path, "wb") as f:
             f.write(image_bytes)
 
         try:
             predictions, crop_name, conf = await cls._run_inference_on_file(temp_path)
-
-            # Filter condition: time >= 3.0s OR low confidence (< 0.80) OR force_sample
             should_sample = force_sample or (time_elapsed >= 3.0) or (conf < 0.80)
 
             if not should_sample:
@@ -192,11 +240,11 @@ class FrameSamplerService:
 
             cls._last_stream_sample_time = now
 
-            # Save frame permanently
             permanent_name = f"stream_{uuid.uuid4().hex[:10]}.jpg"
             permanent_path = os.path.join(UPLOAD_DIR, permanent_name)
             os.rename(temp_path, permanent_path)
 
+            target_model = resolve_target_model(crop_name)
             rel_url = f"/uploads/verification_frames/{permanent_name}"
             vf = VerificationFrame(
                 raw_input_id=None,
@@ -204,16 +252,18 @@ class FrameSamplerService:
                 storage_path=permanent_path,
                 image_url=rel_url,
                 parent_crop_predicted=crop_name,
+                target_model_name=target_model,
                 parent_confidence=conf,
                 model_predictions=json.dumps(predictions),
                 status="pending",
+                verification_status="pending",
                 ready_for_retraining=False
             )
             db.add(vf)
             await db.commit()
             await db.refresh(vf)
 
-            logger.info(f"[FrameSampler] Stream keyframe sampled ID={vf.id}, crop='{crop_name}', conf={conf:.2f} (reason: conf_alert={conf < 0.80})")
+            logger.info(f"[FrameSampler] Stream keyframe sampled ID={vf.id}, crop='{crop_name}', target='{target_model}', conf={conf:.2f}")
             return vf
         except Exception as exc:
             logger.error(f"[FrameSampler] Error processing stream frame: {exc}")
@@ -223,7 +273,7 @@ class FrameSamplerService:
 
     @classmethod
     async def _run_inference_on_file(cls, file_path: str) -> Tuple[List[Dict[str, Any]], str, float]:
-        """Helper method to execute Two-Phase model inference on an image file."""
+        """Executes Parent classification -> matches child ONNX model for two-phase detection."""
         try:
             registry = ModelRegistry.get()
             detections = await registry.async_run_inference(file_path, skip_vlm=True)

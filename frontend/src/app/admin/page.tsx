@@ -12,7 +12,11 @@ import {
   ChevronRight,
   Layers,
   Trash2,
+  Lock,
+  LogOut,
+  ShieldCheck,
   CheckSquare,
+  Cpu,
 } from "lucide-react";
 import styles from "./page.module.css";
 
@@ -38,9 +42,11 @@ interface VerificationFrame {
   storage_path: string;
   image_url: string;
   parent_crop_predicted: string | null;
+  target_model_name: string | null;
   parent_confidence: number;
   model_predictions: BoundingBox[];
   status: "pending" | "approved" | "rejected" | "corrected";
+  verification_status?: string;
   human_crop_label: string | null;
   human_annotations: BoundingBox[];
   verified_by: string;
@@ -57,6 +63,44 @@ interface Metrics {
   corrected_count: number;
   low_confidence_count: number;
 }
+
+const CHILD_MODELS = [
+  "Apple_best_int8.onnx",
+  "Banana_best_int8.onnx",
+  "Bitter_Gourd_best_int8.onnx",
+  "Brinjal_best_int8.onnx",
+  "Cashew_best_int8.onnx",
+  "Cassava_best_int8.onnx",
+  "Cauliflower_best_int8.onnx",
+  "Cherry_best_int8.onnx",
+  "Coconut_best_int8.onnx",
+  "Coffee_best_int8.onnx",
+  "Coriander_best_int8.onnx",
+  "Corn_best_int8.onnx",
+  "Grape_best_int8.onnx",
+  "Groundnut_best_int8.onnx",
+  "Guava_best_int8.onnx",
+  "Jackfruit_best_int8.onnx",
+  "Juniper_best_int8.onnx",
+  "Lemon_best_int8.onnx",
+  "Mango_best_int8.onnx",
+  "Neem_best_int8.onnx",
+  "Papaya_best_int8.onnx",
+  "Peach_best_int8.onnx",
+  "Pepper_Bell_best_int8.onnx",
+  "Potato_best_int8.onnx",
+  "Pumkin_best_int8.onnx",
+  "Rice_best_int8.onnx",
+  "Rose_best_int8.onnx",
+  "Sesame_best_int8.onnx",
+  "SoyaBean_best_int8.onnx",
+  "Strawberry_best_int8.onnx",
+  "SugarCane_best_int8.onnx",
+  "Sunflower_best_int8.onnx",
+  "Tobacco_best_int8.onnx",
+  "Tomato_best_int8.onnx",
+  "Wheat_best_int8.onnx",
+];
 
 const CROP_OPTIONS = [
   "Apple",
@@ -120,6 +164,15 @@ const DISEASE_OPTIONS = [
 ];
 
 export default function AdminDashboardPage() {
+  // Auth State
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [authChecking, setAuthChecking] = useState<boolean>(true);
+  const [loginUsername, setLoginUsername] = useState<string>("admin");
+  const [loginPassword, setLoginPassword] = useState<string>("");
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [isLoggingIn, setIsLoggingIn] = useState<boolean>(false);
+
+  // Verification Data States
   const [frames, setFrames] = useState<VerificationFrame[]>([]);
   const [metrics, setMetrics] = useState<Metrics>({
     total_count: 0,
@@ -132,10 +185,10 @@ export default function AdminDashboardPage() {
 
   // Filter States
   const [statusFilter, setStatusFilter] = useState<string>("pending");
+  const [targetModelFilter, setTargetModelFilter] = useState<string>("");
   const [cropFilter, setCropFilter] = useState<string>("");
   const [lowConfOnly, setLowConfOnly] = useState<boolean>(false);
   const [page, setPage] = useState<number>(1);
-  const [totalPages, setTotalPages] = useState<number>(1);
 
   // Selected Active Frame for Verification
   const [selectedFrame, setSelectedFrame] = useState<VerificationFrame | null>(null);
@@ -158,8 +211,66 @@ export default function AdminDashboardPage() {
   const [drawStart, setDrawStart] = useState<{ x: number; y: number } | null>(null);
   const [drawCurrent, setDrawCurrent] = useState<{ x: number; y: number } | null>(null);
 
+  // Check saved session token on load
+  useEffect(() => {
+    const checkToken = async () => {
+      const savedToken = localStorage.getItem("jatayu_admin_token");
+      if (!savedToken) {
+        setIsAuthenticated(false);
+        setAuthChecking(false);
+        return;
+      }
+      try {
+        const res = await fetch(`${BACKEND}/api/admin/auth/verify`, {
+          headers: { Authorization: `Bearer ${savedToken}` },
+        });
+        if (res.ok) {
+          setIsAuthenticated(true);
+        } else {
+          localStorage.removeItem("jatayu_admin_token");
+          setIsAuthenticated(false);
+        }
+      } catch {
+        setIsAuthenticated(false);
+      } finally {
+        setAuthChecking(false);
+      }
+    };
+    checkToken();
+  }, []);
+
+  // Admin Login Handler
+  const handleLoginSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoginError(null);
+    setIsLoggingIn(true);
+    try {
+      const res = await fetch(`${BACKEND}/api/admin/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: loginUsername, password: loginPassword }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || "Authentication failed.");
+      }
+      localStorage.setItem("jatayu_admin_token", data.access_token);
+      setIsAuthenticated(true);
+    } catch (err: any) {
+      setLoginError(err.message || "Invalid credentials.");
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem("jatayu_admin_token");
+    setIsAuthenticated(false);
+  };
+
   // Fetch Verification Frames from shared backend
   const fetchFrames = useCallback(async () => {
+    if (!isAuthenticated) return;
     try {
       let minConf = 0.0;
       let maxConf = 1.0;
@@ -176,14 +287,18 @@ export default function AdminDashboardPage() {
         max_confidence: maxConf.toString(),
       });
       if (cropFilter) params.append("crop_type", cropFilter);
+      if (targetModelFilter) params.append("target_model_name", targetModelFilter);
 
-      const res = await fetch(`${BACKEND}/api/admin/verification/frames?${params.toString()}`);
+      const savedToken = localStorage.getItem("jatayu_admin_token");
+      const headers: Record<string, string> = {};
+      if (savedToken) headers["Authorization"] = `Bearer ${savedToken}`;
+
+      const res = await fetch(`${BACKEND}/api/admin/verification/frames?${params.toString()}`, { headers });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
 
       setFrames(data.frames || []);
       setMetrics(data.metrics || metrics);
-      setTotalPages(data.pagination?.total_pages || 1);
 
       if (data.frames && data.frames.length > 0 && !selectedFrame) {
         const first = data.frames[0];
@@ -194,7 +309,7 @@ export default function AdminDashboardPage() {
     } catch (err) {
       console.error("[Admin] Error fetching verification frames:", err);
     }
-  }, [page, statusFilter, cropFilter, lowConfOnly]);
+  }, [isAuthenticated, page, statusFilter, cropFilter, targetModelFilter, lowConfOnly]);
 
   useEffect(() => {
     fetchFrames();
@@ -212,7 +327,7 @@ export default function AdminDashboardPage() {
 
   // Render HTML5 Canvas
   useEffect(() => {
-    if (!selectedFrame || !canvasRef.current) return;
+    if (!selectedFrame || !canvasRef.current || !isAuthenticated) return;
 
     const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d");
@@ -288,7 +403,7 @@ export default function AdminDashboardPage() {
         ctx.strokeRect(dx, dy, dw, dh);
       }
     };
-  }, [selectedFrame, humanBoxes, selectedBoxIndex, isDrawing, drawStart, drawCurrent]);
+  }, [selectedFrame, humanBoxes, selectedBoxIndex, isDrawing, drawStart, drawCurrent, isAuthenticated]);
 
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!canvasRef.current) return;
@@ -378,7 +493,11 @@ export default function AdminDashboardPage() {
   };
 
   const handleExport = (format: "json" | "yolo") => {
-    window.open(`${BACKEND}/api/admin/verification/export?format=${format}`, "_blank");
+    let url = `${BACKEND}/api/admin/verification/export?format=${format}`;
+    if (targetModelFilter) {
+      url += `&target_model_name=${encodeURIComponent(targetModelFilter)}`;
+    }
+    window.open(url, "_blank");
   };
 
   const handleIngest = async () => {
@@ -405,6 +524,76 @@ export default function AdminDashboardPage() {
     }
   };
 
+  if (authChecking) {
+    return (
+      <div className={styles.loginShell}>
+        <div style={{ color: "var(--accent-primary)", fontSize: "14px", fontWeight: 700 }}>
+          Authenticating Admin Credentials...
+        </div>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <div className={styles.loginShell}>
+        <div className={styles.loginCard}>
+          <div className={styles.loginHeader}>
+            <div className={styles.logoWrap}>
+              <svg width="36" height="36" viewBox="0 0 32 32" fill="none">
+                <polygon points="16,2 30,26 2,26" stroke="#38BDF8" strokeWidth="2.2" fill="rgba(56,189,248,0.15)" strokeLinejoin="round" />
+                <circle cx="16" cy="18" r="3.5" fill="#38BDF8" />
+              </svg>
+            </div>
+            <div className={styles.loginTitle}>RESTRICTED ADMIN ACCESS</div>
+            <div className={styles.loginSub}>Authorized personnel only. Enter administrator credentials to unlock Mission Control.</div>
+          </div>
+
+          {loginError && (
+            <div style={{ padding: "10px", background: "rgba(239, 68, 68, 0.15)", border: "1px solid rgba(239, 68, 68, 0.4)", borderRadius: "6px", color: "#ef4444", fontSize: "11px", textAlign: "center", fontWeight: 700 }}>
+              ⚠ {loginError}
+            </div>
+          )}
+
+          <form onSubmit={handleLoginSubmit} className={styles.loginForm}>
+            <div className={styles.formGroup}>
+              <label className={styles.formLabel}>ADMIN USERNAME</label>
+              <input
+                type="text"
+                className={styles.formInput}
+                value={loginUsername}
+                onChange={(e) => setLoginUsername(e.target.value)}
+                placeholder="admin"
+                required
+              />
+            </div>
+
+            <div className={styles.formGroup}>
+              <label className={styles.formLabel}>PASSWORD</label>
+              <input
+                type="password"
+                className={styles.formInput}
+                value={loginPassword}
+                onChange={(e) => setLoginPassword(e.target.value)}
+                placeholder="••••••••••••"
+                required
+              />
+            </div>
+
+            <button type="submit" className={styles.loginSubmitBtn} disabled={isLoggingIn}>
+              <Lock size={15} /> {isLoggingIn ? "AUTHENTICATING..." : "AUTHENTICATE ADMIN SESSION"}
+            </button>
+          </form>
+
+          <div style={{ fontSize: "10px", color: "var(--text-muted)", textAlign: "center", borderTop: "1px solid var(--border-subtle)", paddingTop: "12px" }}>
+            <ShieldCheck size={12} style={{ display: "inline", marginRight: "4px", color: "#10B981" }} />
+            Secured Session · Token expires in 24 hours
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className={styles.page}>
       {/* ── HEADER NAVBAR ── */}
@@ -418,7 +607,7 @@ export default function AdminDashboardPage() {
           </div>
           <div>
             <div className={styles.title}>PROJECT JATAYU</div>
-            <div className={styles.subtitle}>ADMINISTRATOR CONTROL & HITL VERIFICATION HUB</div>
+            <div className={styles.subtitle}>AUTHENTICATED ADMIN CONTROL HUB</div>
           </div>
         </div>
 
@@ -436,7 +625,10 @@ export default function AdminDashboardPage() {
             <UploadCloud size={14} /> INGEST MEDIA
           </button>
           <button className={`${styles.actionBtn} ${styles.exportBtn}`} onClick={() => handleExport("yolo")}>
-            <Download size={14} /> EXPORT YOLO DATASET
+            <Download size={14} /> EXPORT {targetModelFilter ? targetModelFilter.replace("_int8.onnx", "").toUpperCase() : "ALL"} DATASET
+          </button>
+          <button className={`${styles.actionBtn} ${styles.logoutBtn}`} onClick={handleLogout} title="Log out from admin session">
+            <LogOut size={14} /> LOGOUT
           </button>
         </div>
       </header>
@@ -507,6 +699,15 @@ export default function AdminDashboardPage() {
             </div>
 
             <div className={styles.filterControls}>
+              <select className={styles.selectInput} value={targetModelFilter} onChange={(e) => setTargetModelFilter(e.target.value)}>
+                <option value="">All Child Models (40 ONNX)</option>
+                {CHILD_MODELS.map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+
               <select className={styles.selectInput} value={cropFilter} onChange={(e) => setCropFilter(e.target.value)}>
                 <option value="">All Crops</option>
                 {CROP_OPTIONS.map((c) => (
@@ -515,13 +716,6 @@ export default function AdminDashboardPage() {
                   </option>
                 ))}
               </select>
-
-              <button
-                className={`${styles.toggleBtn} ${lowConfOnly ? styles.toggleBtnActive : ""}`}
-                onClick={() => setLowConfOnly(!lowConfOnly)}
-              >
-                &lt;80% CONFIDENCE
-              </button>
             </div>
           </div>
 
@@ -552,6 +746,9 @@ export default function AdminDashboardPage() {
                         <span className={`${styles.badge} ${styles[`badge${frame.status.charAt(0).toUpperCase() + frame.status.slice(1)}`]}`}>
                           {frame.status}
                         </span>
+                        <span className={styles.badge} style={{ background: "rgba(56, 189, 248, 0.12)", color: "#38BDF8", fontSize: "8px" }}>
+                          {frame.target_model_name ? frame.target_model_name.replace("_best_int8.onnx", "") : "Model"}
+                        </span>
                         <span className={isLowConf ? styles.confBadgeLow : styles.confBadgeHigh}>
                           {(frame.parent_confidence * 100).toFixed(0)}%
                         </span>
@@ -573,6 +770,10 @@ export default function AdminDashboardPage() {
                   <span>FRAME #{selectedFrame.id} VERIFICATION WORKSPACE</span>
                   <span className={styles.badge} style={{ background: "var(--bg-panel-alt)", color: "var(--accent-primary)" }}>
                     Predicted Crop: {selectedFrame.parent_crop_predicted || "Plant"} ({(selectedFrame.parent_confidence * 100).toFixed(1)}%)
+                  </span>
+                  <span className={styles.badge} style={{ background: "rgba(139, 92, 246, 0.15)", color: "#8B5CF6", border: "1px solid rgba(139, 92, 246, 0.4)" }}>
+                    <Cpu size={10} style={{ display: "inline", marginRight: "4px" }} />
+                    Target Child Model: {selectedFrame.target_model_name || "Auto"}
                   </span>
                 </div>
 
@@ -659,7 +860,7 @@ export default function AdminDashboardPage() {
                     <CheckCircle size={15} /> APPROVE (GROUND TRUTH)
                   </button>
                   <button className={styles.correctBtn} onClick={() => handleDecision("corrected")}>
-                    <Edit3 size={15} /> SUBMIT CORRECTION
+                    <Edit3 size={15} /> RE-LABEL & DRAW
                   </button>
                   <button className={styles.rejectBtn} onClick={() => handleDecision("rejected")}>
                     <XCircle size={15} /> REJECT
