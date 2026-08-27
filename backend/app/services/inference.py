@@ -454,13 +454,13 @@ class ChildModelRegistry:
 
         return crops
 
-    MAX_LOADED_CHILDREN: int = 2  # Keeps memory strictly under Render 512MB RAM limit
+    MAX_LOADED_CHILDREN: int = 1  # Strictly 1 child model in memory to fit under Render 512MB RAM limit
 
     def get_child_model(self, crop_name: str, device: str = "cpu") -> Optional[Dict[str, Any]]:
         """
         Retrieves or dynamically loads the child ONNX model for the classified crop_name.
         Returns a dict with {session, names, imgsz, stride, task, path} or None.
-        Enforces MAX_LOADED_CHILDREN limit to fit inside Render's 512MB RAM limit.
+        Enforces MAX_LOADED_CHILDREN limit (1) to fit inside Render's 512MB RAM limit.
         """
         import gc
 
@@ -475,20 +475,10 @@ class ChildModelRegistry:
 
         # Enforce LRU Memory Limit for Render (512MB RAM)
         # Drop oldest loaded child model before loading a new one
-        unique_loaded = list(set(id(info) for info in self._loaded_models.values()))
-        if len(unique_loaded) >= self.MAX_LOADED_CHILDREN:
-            # Find key of oldest loaded model to remove
-            keys_to_remove = []
-            oldest_id = unique_loaded[0]
-            for k, info in list(self._loaded_models.items()):
-                if id(info) == oldest_id:
-                    keys_to_remove.append(k)
-
-            for k in keys_to_remove:
-                del self._loaded_models[k]
-
+        if len(self._loaded_models) >= self.MAX_LOADED_CHILDREN:
+            self._loaded_models.clear()
             gc.collect()
-            logger.info(f"[ChildModelRegistry] Evicted oldest child model from memory to preserve RAM (Limit: {self.MAX_LOADED_CHILDREN}).")
+            logger.info(f"[ChildModelRegistry] Cleared previous child models from memory to preserve RAM (Limit: {self.MAX_LOADED_CHILDREN}).")
 
         model_path = self.find_child_model_path(crop_name)
         if not model_path:
@@ -501,7 +491,13 @@ class ChildModelRegistry:
                 f"[ChildModelRegistry] ON-DEMAND LOADING child ONNX model for '{crop_name}': "
                 f"{model_path}"
             )
-            session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+            # Render 512MB RAM optimization: disable memory arena, use sequential execution
+            sess_opts = ort.SessionOptions()
+            sess_opts.enable_cpu_mem_arena = False
+            sess_opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+            sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
+
+            session = ort.InferenceSession(model_path, sess_options=sess_opts, providers=["CPUExecutionProvider"])
             metadata = _load_onnx_metadata(model_path)
 
             model_info = {
@@ -1002,6 +998,8 @@ class DiseaseDetectionPipeline:
             except Exception as vlm_exc:
                 logger.warning(f"[VLM Audit] Async frame audit error: {vlm_exc}")
 
+        import gc
+        gc.collect()
         return final_dets
 
     def _run_with_child_microservice(self, image_path: str) -> List[Dict[str, Any]]:
