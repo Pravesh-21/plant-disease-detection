@@ -98,10 +98,16 @@ app.add_middleware(
 async def options_handler(full_path: str):
     return {}
 
+# Ensure uploads directory exists and mount static files
+uploads_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "uploads"))
+os.makedirs(uploads_dir, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=uploads_dir), name="uploads")
+
 # Register API routers
-app.include_router(utms_router,       prefix="/api")
-app.include_router(mission_router,    prefix="/api")
-app.include_router(inference_router,  prefix="/api")
+app.include_router(utms_router,          prefix="/api")
+app.include_router(mission_router,       prefix="/api")
+app.include_router(inference_router,     prefix="/api")
+app.include_router(verification_router,  prefix="/api")
 
 
 @app.get("/")
