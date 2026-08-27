@@ -1,0 +1,46 @@
+:root {
+  --bg-canvas:     #0B101B;
+  --bg-surface:    #111724;
+  --bg-panel:      #151C2A;
+  --bg-panel-alt:  #1A2335;
+  --bg-sidebar:    #0E1422;
+
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(56, 189, 248, 0.35);
+  --border-bright: rgba(56, 189, 248, 0.45);
+  --border-cyan:   rgba(56, 189, 248, 0.25);
+
+  --accent-primary:        #38BDF8;
+  --accent-primary-dim:    rgba(56, 189, 248, 0.12);
+  --swatch-hover:   #222B3D;
+
+  --text-primary:   #F8FAFC;
+  --text-secondary: #94A3B8;
+  --text-muted:     #64748B;
+
+  --font-sans: 'Plus Jakarta Sans', 'Inter', -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+
+  --shadow-button: 0 0 16px rgba(56, 189, 248, 0.25);
+  --shadow-card:   0 8px 32px rgba(0, 0, 0, 0.45);
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  height: 100%;
+  width: 100%;
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
