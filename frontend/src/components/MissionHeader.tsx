@@ -124,6 +124,13 @@ export default function MissionHeader({
           <Activity size={13} color="#10B981"/>
           <span className={styles.telNum} style={{ color: "#10B981" }}>12ms</span>
         </div>
+
+        <div className={styles.telDivider}/>
+
+        {/* Admin Dashboard Link */}
+        <a href="/admin" className={styles.adminBtn} title="Open Admin HITL Dashboard">
+          ADMIN DASHBOARD
+        </a>
       </div>
     </header>
   );
