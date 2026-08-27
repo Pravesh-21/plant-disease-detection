@@ -30,15 +30,16 @@ async def model_registry():
     children = []
 
     for crop in crops:
-        norm = crop.lower().replace(" ", "").replace("_", "").replace("-", "")
-        is_loaded = norm in child_reg._loaded_models
+        is_loaded = child_reg.is_child_loaded(crop)
 
         task = "detect"
         class_count = None
         class_names = None
 
         if is_loaded:
-            model_info = child_reg._loaded_models.get(norm, {})
+            raw_norm = crop.lower().replace("_", "").replace(" ", "").replace("-", "")
+            norm_crop = child_reg.CROP_ALIASES.get(raw_norm, raw_norm)
+            model_info = child_reg._loaded_models.get(norm_crop) or child_reg._loaded_models.get(raw_norm, {})
             task = model_info.get("task", "detect")
             names = model_info.get("names", {})
             class_count = len(names)
@@ -50,7 +51,7 @@ async def model_registry():
         children.append({
             "folder":       filename,
             "display_name": crop,
-            "has_weights":  True,
+            "has_weights":  weights_path is not None,
             "weights_path": weights_path,
             "is_loaded":    is_loaded,
             "task":         task,

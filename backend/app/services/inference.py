@@ -528,6 +528,12 @@ class ChildModelRegistry:
         """Manually awaken / load a child model into memory for client demonstration."""
         return self.get_child_model(crop_name, device or "cpu")
 
+    def is_child_loaded(self, crop_name: str) -> bool:
+        """Checks if the child model for crop_name is currently awoken in memory."""
+        raw_norm = crop_name.lower().replace("_", "").replace(" ", "").replace("-", "")
+        norm_crop = self.CROP_ALIASES.get(raw_norm, raw_norm)
+        return norm_crop in self._loaded_models or raw_norm in self._loaded_models
+
     def loaded_crops(self) -> List[str]:
         # Deduplicate (raw_norm and norm_crop both point to same model_info)
         seen = set()
@@ -866,20 +872,14 @@ class DiseaseDetectionPipeline:
         Phase 1: Local ONNX parent crop classification.
         Phase 2: Remote ONNX child disease detection microservice + optional Groq VLM audit.
         """
-        if CHILD_SERVICE_URL and CHILD_SERVICE_URL.startswith("http"):
-            try:
-                return await self._async_run_with_child_microservice(image_path, skip_vlm=skip_vlm)
-            except Exception as exc:
-                logger.warning(f"[Pipeline] Async child microservice dispatch error: {exc} -- falling back to local ONNX pipeline.")
-                return self._real_two_phase_inference(image_path)
+        return await self.async_run_inference(image_path, skip_vlm=skip_vlm)
 
-        return self._real_two_phase_inference(image_path)
-
-    async def _async_run_with_child_microservice(self, image_path: str, skip_vlm: bool = False) -> List[Dict[str, Any]]:
+    async def async_run_inference(self, image_path: str, skip_vlm: bool = False) -> List[Dict[str, Any]]:
         """
-        Hybrid pipeline (Non-blocking Async):
+        Hybrid two-phase pipeline (Local-First Child Model Execution):
           Phase 1: Run parent crop classification locally on primary backend (ONNX, ~60MB RAM).
-          Phase 2: Forward image + crop name to child Render microservice asynchronously via httpx.AsyncClient.
+          Phase 2: Load and run matched child ONNX model locally from Models/Child/ using ONNX Runtime.
+                   If local model unavailable, forward asynchronously to child microservice.
         """
         import httpx
 
@@ -894,42 +894,75 @@ class DiseaseDetectionPipeline:
             top_conf  = 0.75
             parent_model = "Parent_1"
 
-        logger.info(f"[Child Microservice] Phase 1 complete: crop='{crop_name}' ({top_conf*100:.1f}%) via {parent_model}")
+        logger.info(f"[Two-Phase Inference] Phase 1 complete: crop='{crop_name}' ({top_conf*100:.1f}%) via {parent_model}")
 
-        # Phase 2 — non-blocking async HTTP request to child microservice
+        final_dets: List[Dict[str, Any]] = []
+
+        # -- Strategy A: Local-First Child ONNX Execution --
         try:
-            with open(image_path, "rb") as f:
-                image_bytes = f.read()
+            child_info = ChildModelRegistry.get().get_child_model(crop_name)
+            if child_info is not None:
+                logger.info(f"[Two-Phase Inference] Phase 2: Awaking local child ONNX model '{child_info['path']}' for crop '{crop_name}'")
+                local_dets = self._run_child_detection(child_info, image_path, crop_name, min_conf=0.10)
+                if local_dets:
+                    for det in local_dets:
+                        det.setdefault("plant_class", crop_name)
+                        det.setdefault("parent_confidence", round(top_conf, 4))
+                        det.setdefault("parent_model", parent_model)
+                        det.setdefault("child_status", "AWOKEN (IN MEMORY)")
+                        det.setdefault("vlm_verdict", "UNAUDITED")
+                        det.setdefault("vlm_reasoning", "")
+                        det.setdefault("pathogen_name", None)
+                        det.setdefault("severity", "HIGH" if "healthy" not in det["detected_class"].lower() else "LOW")
+                        det.setdefault("ai_audited", False)
+                    final_dets = local_dets
+                    logger.info(f"[Two-Phase Inference] Local child model '{child_info['path']}' produced {len(final_dets)} detection(s).")
+                else:
+                    logger.info(f"[Two-Phase Inference] Local child model ran for '{crop_name}' but found no bounding boxes above threshold.")
+        except Exception as local_err:
+            logger.warning(f"[Two-Phase Inference] Local child model execution warning: {local_err}")
 
-            suffix = os.path.splitext(image_path)[1] or ".jpg"
-            target_url = f"{CHILD_SERVICE_URL}/predict"
+        # -- Strategy B: Remote Child Microservice Fallback --
+        if not final_dets:
+            try:
+                with open(image_path, "rb") as f:
+                    image_bytes = f.read()
 
-            async with httpx.AsyncClient(timeout=25.0) as client:
-                logger.info(f"[Child Microservice] Async forwarding to {target_url}?crop_name={crop_name}")
-                response = await client.post(
-                    target_url,
-                    params={"crop_name": crop_name},
-                    files={"file": (f"frame{suffix}", image_bytes, "image/jpeg")},
-                )
-                response.raise_for_status()
-                child_result = response.json()
+                suffix = os.path.splitext(image_path)[1] or ".jpg"
+                target_url = f"{CHILD_SERVICE_URL}/predict"
 
-            detections = child_result.get("predictions", [])
-            logger.info(f"[Child Microservice] Received {len(detections)} detection(s) for '{crop_name}'.")
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    logger.info(f"[Child Microservice] Async forwarding to {target_url}?crop_name={crop_name}")
+                    response = await client.post(
+                        target_url,
+                        params={"crop_name": crop_name},
+                        files={"file": (f"frame{suffix}", image_bytes, "image/jpeg")},
+                    )
+                    response.raise_for_status()
+                    child_result = response.json()
 
-            # Inject parent metadata into each detection for frontend compatibility
-            for det in detections:
-                det.setdefault("plant_class", crop_name)
-                det.setdefault("parent_confidence", round(top_conf, 4))
-                det.setdefault("parent_model", parent_model)
-                det.setdefault("child_status", "AWOKEN (IN MEMORY)")
-                det.setdefault("vlm_verdict", "UNAUDITED")
-                det.setdefault("vlm_reasoning", "")
-                det.setdefault("pathogen_name", None)
-                det.setdefault("severity", "HIGH")
-                det.setdefault("ai_audited", False)
+                detections = child_result.get("predictions", [])
+                logger.info(f"[Child Microservice] Received {len(detections)} detection(s) for '{crop_name}'.")
 
-            final_dets = detections if detections else [{
+                for det in detections:
+                    det.setdefault("plant_class", crop_name)
+                    det.setdefault("parent_confidence", round(top_conf, 4))
+                    det.setdefault("parent_model", parent_model)
+                    det.setdefault("child_status", "AWOKEN (IN MEMORY)")
+                    det.setdefault("vlm_verdict", "UNAUDITED")
+                    det.setdefault("vlm_reasoning", "")
+                    det.setdefault("pathogen_name", None)
+                    det.setdefault("severity", "HIGH" if "healthy" not in det.get("detected_class", "").lower() else "LOW")
+                    det.setdefault("ai_audited", False)
+
+                if detections:
+                    final_dets = detections
+            except Exception as exc:
+                logger.error(f"[Child Microservice] Async request to {CHILD_SERVICE_URL} failed: {exc}")
+
+        # Default fallback if neither local nor remote returned bounding boxes
+        if not final_dets:
+            final_dets = [{
                 "detected_class":    f"{crop_name}_Healthy",
                 "confidence_score":  round(top_conf, 4),
                 "x_center": 0.5, "y_center": 0.5,
@@ -942,130 +975,41 @@ class DiseaseDetectionPipeline:
                 "pathogen_name": None, "severity": "LOW", "ai_audited": False,
             }]
 
-            if not skip_vlm:
-                # -- Groq VLM Visual Frame Audit Gate
-                try:
-                    import asyncio
-                    from app.services.ai_service import _get_groq_key, VLMAuditService
-                    if _get_groq_key() and final_dets:
-                        top_det = final_dets[0]
-                        logger.info(f"[VLM Audit] Running non-blocking Groq visual audit for crop='{crop_name}', detected='{top_det['detected_class']}'...")
-                        vis_audit = await asyncio.to_thread(
-                            VLMAuditService.audit_image_frame,
-                            image_path=image_path,
-                            crop_candidate=crop_name,
-                            detected_class=top_det["detected_class"],
-                            confidence=top_det["confidence_score"],
-                        )
-                        if vis_audit:
-                            top_det["vlm_verdict"] = vis_audit.get("verdict", "CONFIRMED")
-                            top_det["vlm_reasoning"] = vis_audit.get("reasoning", "")
-                            top_det["ai_audited"] = True
-                            if vis_audit.get("verdict") == "OVERRIDDEN":
-                                override_class = vis_audit.get("vlm_suggested_class")
-                                if override_class:
-                                    logger.info(f"[VLM Audit] Overriding class from '{top_det['detected_class']}' to '{override_class}' based on Groq visual inspection.")
-                                    top_det["detected_class"] = override_class
-                except Exception as vlm_exc:
-                    logger.warning(f"[VLM Audit] Async frame audit error: {vlm_exc}")
+        if not skip_vlm:
+            # -- Groq VLM Visual Frame Audit Gate
+            try:
+                import asyncio
+                from app.services.ai_service import _get_groq_key, VLMAuditService
+                if _get_groq_key() and final_dets:
+                    top_det = final_dets[0]
+                    logger.info(f"[VLM Audit] Running non-blocking Groq visual audit for crop='{crop_name}', detected='{top_det['detected_class']}'...")
+                    vis_audit = await asyncio.to_thread(
+                        VLMAuditService.audit_image_frame,
+                        image_path=image_path,
+                        crop_candidate=crop_name,
+                        detected_class=top_det["detected_class"],
+                        confidence=top_det["confidence_score"],
+                    )
+                    if vis_audit:
+                        top_det["vlm_verdict"] = vis_audit.get("verdict", "CONFIRMED")
+                        top_det["vlm_reasoning"] = vis_audit.get("reasoning", "")
+                        top_det["ai_audited"] = True
+                        if vis_audit.get("verdict") == "OVERRIDDEN":
+                            override_class = vis_audit.get("vlm_suggested_class")
+                            if override_class:
+                                logger.info(f"[VLM Audit] Overriding class from '{top_det['detected_class']}' to '{override_class}' based on Groq visual inspection.")
+                                top_det["detected_class"] = override_class
+            except Exception as vlm_exc:
+                logger.warning(f"[VLM Audit] Async frame audit error: {vlm_exc}")
 
-            return final_dets
-
-        except Exception as exc:
-            logger.error(f"[Child Microservice] Async request to {CHILD_SERVICE_URL} failed: {exc}")
-            return [{
-                "detected_class":    f"{crop_name}_Healthy",
-                "confidence_score":  round(top_conf, 4),
-                "x_center": 0.5, "y_center": 0.5,
-                "plant_class": crop_name,
-                "parent_confidence": round(top_conf, 4),
-                "parent_model": parent_model,
-                "model_name": f"{crop_name}_best_int8.onnx",
-                "child_status": "STANDBY",
-                "vlm_verdict": "UNAUDITED", "vlm_reasoning": "",
-                "pathogen_name": None, "severity": "LOW", "ai_audited": False,
-            }]
+        return final_dets
 
     def _run_with_child_microservice(self, image_path: str) -> List[Dict[str, Any]]:
         """
-        Hybrid pipeline:
-          Phase 1: Run parent crop classification locally on primary backend (ONNX, ~60MB RAM).
-          Phase 2: Forward image + crop name to the child Render microservice via HTTP.
+        Sync wrapper: Attempts local child ONNX execution first, then remote microservice.
         """
-        import httpx
-
-        # Phase 1 — classify crop locally via Parent ONNX ensemble
-        best = self._registry.cascade_classify(image_path)
-        if best is not None:
-            crop_name = best["crop_name"]
-            top_conf  = best["conf"]
-            parent_model = best["parent_model"]
-        else:
-            crop_name = "Plant"
-            top_conf  = 0.75
-            parent_model = "Parent_1"
-
-        logger.info(f"[Child Microservice] Phase 1 complete: crop='{crop_name}' ({top_conf*100:.1f}%) via {parent_model}")
-
-        # Phase 2 — forward to child microservice
-        try:
-            with open(image_path, "rb") as f:
-                image_bytes = f.read()
-
-            suffix = os.path.splitext(image_path)[1] or ".jpg"
-            target_url = f"{CHILD_SERVICE_URL}/predict"
-            with httpx.Client(timeout=25.0) as client:
-                logger.info(f"[Child Microservice] Forwarding to {target_url}?crop_name={crop_name}")
-                response = client.post(
-                    target_url,
-                    params={"crop_name": crop_name},
-                    files={"file": (f"frame{suffix}", image_bytes, "image/jpeg")},
-                )
-                response.raise_for_status()
-                child_result = response.json()
-
-            detections = child_result.get("predictions", [])
-            logger.info(f"[Child Microservice] Received {len(detections)} detection(s) for '{crop_name}'.")
-
-            # Inject parent metadata into each detection for frontend compatibility
-            for det in detections:
-                det.setdefault("plant_class", crop_name)
-                det.setdefault("parent_confidence", round(top_conf, 4))
-                det.setdefault("parent_model", parent_model)
-                det.setdefault("child_status", "AWOKEN (IN MEMORY)")
-                det.setdefault("vlm_verdict", "UNAUDITED")
-                det.setdefault("vlm_reasoning", "")
-                det.setdefault("pathogen_name", None)
-                det.setdefault("severity", "HIGH")
-                det.setdefault("ai_audited", False)
-
-            return detections if detections else [{
-                "detected_class":    f"{crop_name}_Healthy",
-                "confidence_score":  round(top_conf, 4),
-                "x_center": 0.5, "y_center": 0.5,
-                "plant_class": crop_name,
-                "parent_confidence": round(top_conf, 4),
-                "parent_model": parent_model,
-                "model_name": f"{crop_name}_best_int8.onnx",
-                "child_status": "AWOKEN (IN MEMORY)",
-                "vlm_verdict": "UNAUDITED", "vlm_reasoning": "",
-                "pathogen_name": None, "severity": "LOW", "ai_audited": False,
-            }]
-
-        except Exception as exc:
-            logger.error(f"[Child Microservice] Request to {CHILD_SERVICE_URL} failed: {exc}")
-            return [{
-                "detected_class":    f"{crop_name}_Healthy",
-                "confidence_score":  round(top_conf, 4),
-                "x_center": 0.5, "y_center": 0.5,
-                "plant_class": crop_name,
-                "parent_confidence": round(top_conf, 4),
-                "parent_model": parent_model,
-                "model_name": f"{crop_name}_best_int8.onnx",
-                "child_status": "STANDBY",
-                "vlm_verdict": "UNAUDITED", "vlm_reasoning": "",
-                "pathogen_name": None, "severity": "LOW", "ai_audited": False,
-            }]
+        import asyncio
+        return asyncio.run(self.async_run_inference(image_path, skip_vlm=True))
 
     def _mock_results(self, image_path: str) -> List[Dict[str, Any]]:
         """Simulated detections for demo / mock-mode environments."""

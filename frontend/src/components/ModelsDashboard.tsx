@@ -1,15 +1,32 @@
-import React, { useState } from "react";
+import React, { useState, useMemo } from "react";
 import {
-  Cpu, Zap, HardDrive, RefreshCw, CheckCircle2,
-  AlertTriangle, Box, Layers, ArrowRight, RotateCcw, Activity, Sparkles, Bot
+  Cpu,
+  Zap,
+  HardDrive,
+  RefreshCw,
+  CheckCircle2,
+  AlertTriangle,
+  Box,
+  Layers,
+  ArrowRight,
+  RotateCcw,
+  Activity,
+  Sparkles,
+  Search,
+  Filter,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 import { useModelRegistry, ChildModelInfo } from "@/hooks/useModelRegistry";
 import { useGroqStatus } from "@/hooks/useGroqStatus";
 import styles from "./ModelsDashboard.module.css";
 
-const BACKEND = process.env.NEXT_PUBLIC_API_URL || process.env.NEXT_PUBLIC_BACKEND_URL || "https://plant-disease-detection-32l7.onrender.com";
+const BACKEND =
+  process.env.NEXT_PUBLIC_API_URL ||
+  process.env.NEXT_PUBLIC_BACKEND_URL ||
+  "https://plant-disease-detection-32l7.onrender.com";
 
-// ── Child Model Card ──────────────────────────────────────────────────────────
+// ── Child Model Card Component ────────────────────────────────────────────────
 function ChildModelCard({
   child,
   onAwaken,
@@ -21,13 +38,22 @@ function ChildModelCard({
 }) {
   const loaded = child.is_loaded;
   const missing = !child.has_weights;
+  const [showClasses, setShowClasses] = useState(false);
 
   return (
     <div
-      className={`${styles.childCard} ${loaded ? styles.childCardLoaded : ""} ${missing ? styles.childCardMissing : ""}`}
+      className={`${styles.childCard} ${loaded ? styles.childCardLoaded : ""} ${
+        missing ? styles.childCardMissing : ""
+      }`}
     >
       <div className={styles.childCardTop}>
-        <span className={styles.childName}>{child.display_name}</span>
+        <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
+          <span className={styles.childName}>{child.display_name}</span>
+          <span className={styles.childFilename}>
+            {child.folder || `${child.display_name}_best_int8.onnx`}
+          </span>
+        </div>
+
         <span
           className={`${styles.childStatusChip} ${
             loaded ? styles.chipLoaded : missing ? styles.chipMissing : styles.chipStandby
@@ -37,10 +63,10 @@ function ChildModelCard({
             className={styles.statusDot}
             style={{
               background: loaded ? "#10B981" : missing ? "#EF4444" : "#FBBF24",
-              boxShadow: loaded ? "0 0 6px #10B981" : "none",
+              boxShadow: loaded ? "0 0 8px #10B981" : "none",
             }}
           />
-          {loaded ? "IN MEMORY" : missing ? "NO WEIGHTS" : "STANDBY"}
+          {loaded ? "AWOKEN (IN MEMORY)" : missing ? "NO WEIGHTS" : "STANDBY"}
         </span>
       </div>
 
@@ -56,7 +82,9 @@ function ChildModelCard({
           </span>
         )}
         {!loaded && child.has_weights && (
-          <span className={styles.metaChip}>LOADS ON-DEMAND</span>
+          <span className={styles.metaChip} style={{ color: "#FBBF24" }}>
+            ON-DEMAND ONNX
+          </span>
         )}
         {missing && (
           <span className={styles.metaChip} style={{ color: "#FCA5A5" }}>
@@ -66,8 +94,31 @@ function ChildModelCard({
       </div>
 
       {loaded && child.class_names && child.class_names.length > 0 && (
-        <div className={styles.childClasses}>
-          {child.class_names.join(" · ")}
+        <div style={{ marginTop: "4px" }}>
+          <button
+            className={styles.toggleClassBtn}
+            onClick={() => setShowClasses(!showClasses)}
+          >
+            {showClasses ? (
+              <>
+                <ChevronUp size={12} /> HIDE DISEASE CLASSES
+              </>
+            ) : (
+              <>
+                <ChevronDown size={12} /> SHOW {child.class_names.length} TRAINED CLASSES
+              </>
+            )}
+          </button>
+
+          {showClasses && (
+            <div className={styles.classBadgesList}>
+              {child.class_names.map((c, i) => (
+                <span key={i} className={styles.classPill}>
+                  {c}
+                </span>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -77,31 +128,34 @@ function ChildModelCard({
             className={styles.awakenBtn}
             onClick={() => onAwaken(child.display_name)}
             disabled={awakening}
-            title="Load this specialist model into GPU memory on-demand"
+            title="Load this specialist model into memory on-demand"
           >
-            <Zap size={11} />
-            {awakening ? "AWAKENING…" : "AWAKEN MODEL (DEMO)"}
+            <Zap size={12} />
+            {awakening ? "AWAKENING MODEL..." : "AWAKEN MODEL (ON-DEMAND)"}
           </button>
         ) : loaded ? (
           <div className={styles.awokenBadge}>
-            <CheckCircle2 size={11} color="#10B981" />
-            <span>AWOKEN &amp; READY FOR INFERENCE</span>
+            <CheckCircle2 size={13} color="#10B981" />
+            <span>AWOKEN &amp; ACTIVE IN INFERENCE PIPELINE</span>
           </div>
         ) : null}
       </div>
-
-      <div className={styles.childFolder}>{child.folder}/</div>
     </div>
   );
 }
 
-// ── Main Dashboard ────────────────────────────────────────────────────────────
+// ── Main Models Dashboard ──────────────────────────────────────────────────────
 export default function ModelsDashboard() {
   const registry = useModelRegistry();
   const groqStatus = useGroqStatus();
   const { parent, children, total_available, total_loaded, loading, error, refresh } = registry;
+  
   const [awakeningCrop, setAwakeningCrop] = useState<string | null>(null);
   const [resetting, setResetting] = useState(false);
+  
+  // Search & Filter States
+  const [searchQuery, setSearchQuery] = useState("");
+  const [statusTab, setStatusTab] = useState<"all" | "loaded" | "standby">("all");
 
   const handleAwaken = async (cropName: string) => {
     setAwakeningCrop(cropName);
@@ -128,6 +182,21 @@ export default function ModelsDashboard() {
       setResetting(false);
     }
   };
+
+  // Filtered children models list
+  const filteredChildren = useMemo(() => {
+    return children.filter((child) => {
+      const matchesSearch =
+        child.display_name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        (child.folder && child.folder.toLowerCase().includes(searchQuery.toLowerCase()));
+
+      if (!matchesSearch) return false;
+
+      if (statusTab === "loaded") return child.is_loaded;
+      if (statusTab === "standby") return !child.is_loaded && child.has_weights;
+      return true;
+    });
+  }, [children, searchQuery, statusTab]);
 
   if (loading) {
     return (
@@ -244,118 +313,54 @@ export default function ModelsDashboard() {
             </span>
           </div>
           <div className={styles.fieldCard}>
-            <span className={styles.fieldLabel}>PyTorch</span>
-            <span className={styles.fieldValue} style={{ color: parent.torch_available ? "#10B981" : "#EF4444" }}>
-              {parent.torch_available ? "AVAILABLE" : "NOT FOUND"}
-            </span>
-          </div>
-          <div className={styles.fieldCard}>
             <span className={styles.fieldLabel}>Loaded Children</span>
             <span className={styles.fieldValue} style={{ color: "#34D399" }}>
               {total_loaded} / {total_available}
             </span>
           </div>
         </div>
-
-        {/* Parent model ensemble breakdown */}
-        {parent.parent_models && parent.parent_models.length > 0 && (
-          <div style={{ display: "flex", gap: "8px", marginTop: "10px", flexWrap: "wrap" }}>
-            {parent.parent_models.map((pm) => (
-              <div
-                key={pm.name}
-                style={{
-                  display: "flex", alignItems: "center", gap: "6px",
-                  background: "rgba(56,189,248,0.07)", border: "1px solid rgba(56,189,248,0.2)",
-                  borderRadius: "6px", padding: "5px 10px", fontSize: "11px",
-                }}
-              >
-                <span style={{ width: "6px", height: "6px", borderRadius: "50%", background: "#10B981", display: "inline-block", boxShadow: "0 0 4px #10B981" }} />
-                <span style={{ color: "#38BDF8", fontWeight: 700 }}>{pm.name}</span>
-                <span style={{ color: "#64748B" }}>·</span>
-                <span style={{ color: "#94A3B8" }}>{pm.classes} classes</span>
-              </div>
-            ))}
-          </div>
-        )}
       </div>
 
-      {/* ── Two-Stage Groq AI LLM / VLM Reasoning Engines Card ── */}
-      <div className={styles.parentCard} style={{ border: "1px solid rgba(56, 189, 248, 0.25)" }}>
-        <div className={styles.parentHeader}>
-          <div className={styles.parentTitle}>
-            <Sparkles size={18} color="#38BDF8" />
-            <div>
-              <div className={styles.parentTitleText}>MULTIMODAL AI LLM &amp; VLM REASONING ENGINES</div>
-              <div className={styles.parentSubtext}>
-                Two-stage cognitive validation · Zero-shot vision gatekeeper &amp; agronomic report synthesizer
-              </div>
-            </div>
-          </div>
-          <span
-            className={`${styles.statusBadge} ${
-              groqStatus.configured ? styles.statusOnline : styles.statusMock
-            }`}
+      {/* ── SEARCH & FILTER CONTROLS BAR ── */}
+      <div className={styles.controlsBar}>
+        <div className={styles.searchWrap}>
+          <Search size={14} color="#64748B" />
+          <input
+            type="text"
+            className={styles.searchInput}
+            placeholder="Search 35+ child models by crop or filename..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+          />
+          {searchQuery && (
+            <button className={styles.clearSearchBtn} onClick={() => setSearchQuery("")}>
+              ✕
+            </button>
+          )}
+        </div>
+
+        <div className={styles.filterTabs}>
+          <button
+            className={`${styles.filterTab} ${statusTab === "all" ? styles.filterTabActive : ""}`}
+            onClick={() => setStatusTab("all")}
           >
-            <span
-              className={styles.statusDot}
-              style={{
-                background: groqStatus.configured ? "#10B981" : "#FBBF24",
-                boxShadow: groqStatus.configured ? "0 0 8px #10B981" : "none",
-              }}
-            />
-            {groqStatus.configured ? "GROQ LLM ACTIVE" : "KEY REQUIRED"}
-          </span>
+            ALL MODELS ({children.length})
+          </button>
+          <button
+            className={`${styles.filterTab} ${statusTab === "loaded" ? styles.filterTabActive : ""}`}
+            onClick={() => setStatusTab("loaded")}
+          >
+            AWOKEN IN MEMORY ({total_loaded})
+          </button>
+          <button
+            className={`${styles.filterTab} ${statusTab === "standby" ? styles.filterTabActive : ""}`}
+            onClick={() => setStatusTab("standby")}
+          >
+            STANDBY ({total_available - total_loaded})
+          </button>
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: "10px", marginTop: "4px" }}>
-          {/* Stage 1: VLM Audit */}
-          <div style={{ background: "rgba(11, 16, 27, 0.85)", border: "1px solid rgba(56, 189, 248, 0.2)", borderRadius: "8px", padding: "12px 14px", display: "flex", flexDirection: "column", gap: "6px" }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <span style={{ fontSize: "10px", fontFamily: "var(--font-hud)", fontWeight: 700, color: "#38BDF8" }}>
-                STAGE 1: REAL-TIME VLM VISION GATE
-              </span>
-              <span style={{ fontSize: "9px", fontFamily: "var(--font-hud)", color: groqStatus.configured ? "#34D399" : "#FBBF24", background: groqStatus.configured ? "rgba(16, 185, 129, 0.12)" : "rgba(245, 158, 11, 0.12)", padding: "2px 6px", borderRadius: "4px", border: groqStatus.configured ? "1px solid rgba(16, 185, 129, 0.3)" : "1px solid rgba(245, 158, 11, 0.3)" }}>
-                {groqStatus.configured ? "● READY" : "STANDBY"}
-              </span>
-            </div>
-            <div style={{ fontSize: "13px", fontFamily: "monospace", fontWeight: 700, color: "#F8FAFC" }}>
-              {groqStatus.vlm_model || "qwen/qwen3.6-27b"}
-            </div>
-            <div style={{ fontSize: "10.5px", color: "var(--text-muted)", lineHeight: 1.4 }}>
-              Pre-inference non-plant scene filtering &amp; real-time clinical symptom verification.
-            </div>
-          </div>
-
-          {/* Stage 2: Report Engine */}
-          <div style={{ background: "rgba(11, 16, 27, 0.85)", border: "1px solid rgba(52, 211, 153, 0.2)", borderRadius: "8px", padding: "12px 14px", display: "flex", flexDirection: "column", gap: "6px" }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <span style={{ fontSize: "10px", fontFamily: "var(--font-hud)", fontWeight: 700, color: "#34D399" }}>
-                STAGE 2: AGRONOMY REPORT ENGINE
-              </span>
-              <span style={{ fontSize: "9px", fontFamily: "var(--font-hud)", color: groqStatus.configured ? "#34D399" : "#FBBF24", background: groqStatus.configured ? "rgba(16, 185, 129, 0.12)" : "rgba(245, 158, 11, 0.12)", padding: "2px 6px", borderRadius: "4px", border: groqStatus.configured ? "1px solid rgba(16, 185, 129, 0.3)" : "1px solid rgba(245, 158, 11, 0.3)" }}>
-                {groqStatus.configured ? "● READY" : "STANDBY"}
-              </span>
-            </div>
-            <div style={{ fontSize: "13px", fontFamily: "monospace", fontWeight: 700, color: "#F8FAFC" }}>
-              {groqStatus.report_model || "llama-3.1-8b-instant"}
-            </div>
-            <div style={{ fontSize: "10.5px", color: "var(--text-muted)", lineHeight: 1.4 }}>
-              End-of-mission pathology synthesis, chemical &amp; biological prescriptions, and drone spray grid plans.
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* ── Child Models Header ── */}
-      <div className={styles.childrenHeader}>
-        <div className={styles.childrenTitle}>
-          <Layers size={16} color="#38BDF8" />
-          <span className={styles.childrenTitleText}>ON-DEMAND CHILD SPECIALIST MODELS</span>
-          <span className={styles.childrenCount}>
-            {total_loaded} / {total_available} AWOKEN IN MEMORY
-          </span>
-        </div>
-        <div style={{ display: "flex", gap: "8px" }}>
+        <div className={styles.actionGroup}>
           {total_loaded > 0 && (
             <button
               className={styles.resetBtn}
@@ -363,7 +368,7 @@ export default function ModelsDashboard() {
               disabled={resetting}
               title="Reset all child models back to Standby"
             >
-              <RotateCcw size={11} /> {resetting ? "RESETTING…" : "RESET TO STANDBY"}
+              <RotateCcw size={11} /> {resetting ? "RESETTING..." : "RESET ALL TO STANDBY"}
             </button>
           )}
           <button className={styles.refreshBtn} onClick={refresh}>
@@ -374,7 +379,7 @@ export default function ModelsDashboard() {
 
       {/* ── Child Models Grid ── */}
       <div className={styles.childrenGrid}>
-        {children.map((child) => (
+        {filteredChildren.map((child) => (
           <ChildModelCard
             key={child.folder}
             child={child}
@@ -382,10 +387,10 @@ export default function ModelsDashboard() {
             awakening={awakeningCrop === child.display_name}
           />
         ))}
-        {children.length === 0 && (
+        {filteredChildren.length === 0 && (
           <div className={styles.modelsLoading}>
-            <Box size={24} color="var(--text-muted)" />
-            <span>No child model directories found in Child_Models/</span>
+            <Box size={28} color="var(--text-muted)" />
+            <span>No specialist models match current search or filter query.</span>
           </div>
         )}
       </div>
