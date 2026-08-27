@@ -14,7 +14,7 @@ export type ModelStatus = {
 };
 
 const POLL_INTERVAL_MS = 2000;
-const BACKEND_BASE = process.env.NEXT_PUBLIC_API_URL || process.env.NEXT_PUBLIC_BACKEND_URL || "https://plant-disease-detection-32l7.onrender.com";
+const BACKEND_BASE = process.env.NEXT_PUBLIC_API_URL || process.env.NEXT_PUBLIC_BACKEND_URL || "https://plant-disease-detection-sf8o.onrender.com";
 
 const DEFAULT: ModelStatus = {
   ready: false,

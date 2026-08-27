@@ -187,15 +187,17 @@ def _preprocess_image(image_path: str, imgsz: List[int]) -> np.ndarray:
     """
     from PIL import Image
 
-    img = Image.open(image_path).convert("RGB")
     target_h, target_w = imgsz[0], imgsz[1] if len(imgsz) > 1 else imgsz[0]
-    img_resized = img.resize((target_w, target_h), Image.BILINEAR)
+    with Image.open(image_path) as img:
+        img_rgb = img.convert("RGB")
+        img_resized = img_rgb.resize((target_w, target_h), Image.BILINEAR)
 
     # Convert to float32 numpy, normalize [0, 1], NCHW
     img_array = np.array(img_resized, dtype=np.float32) / 255.0
     img_array = np.transpose(img_array, (2, 0, 1))  # HWC -> CHW
     img_array = np.expand_dims(img_array, axis=0)     # Add batch dim
 
+    del img_resized, img_rgb
     return img_array
 
 

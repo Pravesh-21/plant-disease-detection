@@ -18,7 +18,7 @@ import styles from "./App.module.css";
 const BACKEND =
   import.meta.env.VITE_API_URL ||
   import.meta.env.VITE_BACKEND_URL ||
-  "https://plant-disease-detection-32l7.onrender.com";
+  "https://plant-disease-detection-sf8o.onrender.com";
 
 interface BoundingBox {
   class_name: string;

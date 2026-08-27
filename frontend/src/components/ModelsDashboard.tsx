@@ -24,7 +24,7 @@ import styles from "./ModelsDashboard.module.css";
 const BACKEND =
   process.env.NEXT_PUBLIC_API_URL ||
   process.env.NEXT_PUBLIC_BACKEND_URL ||
-  "https://plant-disease-detection-32l7.onrender.com";
+  "https://plant-disease-detection-sf8o.onrender.com";
 
 // ── Child Model Card Component ────────────────────────────────────────────────
 function ChildModelCard({

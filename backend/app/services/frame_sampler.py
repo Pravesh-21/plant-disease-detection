@@ -202,12 +202,15 @@ class FrameSamplerService:
                     frames_created.append(vf)
 
                 frame_count += 1
+                del frame_mat
 
             raw_input.status = "processed"
             await db.commit()
             logger.info(f"[FrameSampler] Sampled {len(frames_created)} frame(s) from video '{original_filename}'.")
         finally:
             cap.release()
+            import gc
+            gc.collect()
 
         return raw_input, frames_created
 

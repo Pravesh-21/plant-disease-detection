@@ -23,7 +23,7 @@ import styles from "./page.module.css";
 const BACKEND =
   process.env.NEXT_PUBLIC_API_URL ||
   process.env.NEXT_PUBLIC_BACKEND_URL ||
-  "https://plant-disease-detection-32l7.onrender.com";
+  "https://plant-disease-detection-sf8o.onrender.com";
 
 interface BoundingBox {
   class_name: string;
